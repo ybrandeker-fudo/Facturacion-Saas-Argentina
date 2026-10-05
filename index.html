@@ -1935,7 +1935,13 @@ function fCPLineas(r){
 const F_CP = {
   Q:  r => fCPLineas(r),
   T:  r => '+S' + r + '&"-ar"',
-  V:  r => 'VLOOKUP(T' + r + ',Info!$A:$K,5,0)',
+  // En una migración los días del plan viejo más los del nuevo suman el período
+  // entero, así que el divisor se mira a nivel factura, no por línea: si el
+  // período no pasa de un mes y ese mes tiene 31 días, va la columna 6; en los
+  // trimestrales, semestrales y anuales va siempre la 5. El inicio y el fin
+  // están en la primera línea de la factura (la fila "a").
+  V:  (r, a) => 'VLOOKUP(T' + r + ',Info!$A:$K,IF(AND(P' + a + '-O' + a + '<=31,' +
+                'DAY(DATE(YEAR(O' + a + '),MONTH(O' + a + ')+1,0))=31),6,5),0)',
   W:  r => formulaDe('cpW', r),
   X:  r => formulaDe('cpX', r),
   Y:  r => 'IF(ISNUMBER(W' + r + '),+U' + r + '*V' + r + '*(1-(W' + r + '/100))*1.21,"")',
@@ -1950,7 +1956,7 @@ function bloqueCP(){
   return [
     { i:16, col:'Q', f:F_CP.Q(CP_FORM), t:'n' },
     { i:19, col:'T', f:F_CP.T(CP_FORM), t:'s' },
-    { i:21, col:'V', f:F_CP.V(CP_FORM), t:'n' },
+    { i:21, col:'V', f:F_CP.V(CP_FORM, CP_FORM), t:'n' },
     { i:22, col:'W', f:F_CP.W(CP_FORM), t:'n' },
     { i:23, col:'X', f:F_CP.X(CP_FORM), t:'s' },
     { i:24, col:'Y', f:F_CP.Y(CP_FORM), t:'n' },
@@ -1975,9 +1981,11 @@ function hojaPrepCP(){
   });
   const aoa = [tit, form, etiq, COLS_CP.map((t, i) => celda(t, estiloHdr(HDR_CP[i])))];
 
+  let anclaCP = CP_1;                   // primera línea de la factura en curso
   resultado.lineasCP.forEach((l, i) => {
     const r = i + CP_1;
     const p = l.esPrimera;
+    if (p) anclaCP = r;
     const f = [];
     f[0]  = celda(l.orden);
     f[1]  = p ? celda(l.fecha) : celda('');
@@ -2001,7 +2009,7 @@ function hojaPrepCP(){
     f[18] = celda(l.token, l.sinPrecio ? AMARILLO : null);
     f[19] = { t:'s', f:F_CP.T(r) };
     f[20] = celda(l.dias);
-    f[21] = { t:'n', f:F_CP.V(r), z:'#,##0.0000000000' };
+    f[21] = { t:'n', f:F_CP.V(r, anclaCP), z:'#,##0.0000000000' };
     const fW = F_CP.W(r), fX = F_CP.X(r);
     f[22] = fW ? { t:'n', f:fW } : celda('');
     f[23] = fX ? { t:'s', f:fX } : celda('');
@@ -2036,7 +2044,14 @@ const F_UP = {
           'IF(LEN(H' + r + ')=7,MID(H' + r + ',1,4),MID(H' + r + ',1,6))))',
   S: r => '+H' + r,
   T: r => '+I' + r,
-  U: r => 'VLOOKUP(H' + r + ',Info!$A:$G,5,0)-VLOOKUP(J' + r + ',Info!$A:$G,5,0)',
+  // El divisor se elige igual que en la P de los regulares: 31 días cuando son
+  // 31, o cuando el período arranca después del día 1 en un mes de 31. La fecha
+  // de inicio está en la primera línea de la factura (la fila "a").
+  U: (r, a) => {
+    const col = 'IF(AND(T' + r + '<=31,OR(T' + r + '=31,AND(DAY(P' + a + ')>1,' +
+                'DAY(DATE(YEAR(P' + a + '),MONTH(P' + a + ')+1,0))=31))),6,5)';
+    return 'VLOOKUP(H' + r + ',Info!$A:$G,' + col + ',0)-VLOOKUP(J' + r + ',Info!$A:$G,' + col + ',0)';
+  },
   V: r => formulaDe('upV', r),
   W: r => formulaDe('upW', r),
   X: r => 'IF(ISNUMBER(V' + r + '),+T' + r + '*U' + r + '*(1-(V' + r + '/100))*1.21,"")',
@@ -2048,7 +2063,7 @@ function bloqueUP(){
     { i:17, col:'R', f:F_UP.R(UP_FORM), t:'s' },
     { i:18, col:'S', f:F_UP.S(UP_FORM), t:'s' },
     { i:19, col:'T', f:F_UP.T(UP_FORM), t:'n' },
-    { i:20, col:'U', f:F_UP.U(UP_FORM), t:'n' },
+    { i:20, col:'U', f:F_UP.U(UP_FORM, UP_FORM), t:'n' },
     { i:21, col:'V', f:F_UP.V(UP_FORM), t:'n' },
     { i:22, col:'W', f:F_UP.W(UP_FORM), t:'s' },
     { i:23, col:'X', f:F_UP.X(UP_FORM), t:'n' },
@@ -2073,9 +2088,11 @@ function hojaPrepUP(){
   });
   const aoa = [tit, form, etiq, COLS_UP.map((t, i) => celda(t, estiloHdr(HDR_UP[i])))];
 
+  let anclaUP = UP_1;                   // primera línea de la factura en curso
   resultado.lineasUP.forEach((l, i) => {
     const r = i + UP_1;
     const p = l.esPrimera;
+    if (p) anclaUP = r;
     const f = [];
     f[0]  = celda(l.orden);
     f[1]  = p ? celda(l.fecha) : celda('');
@@ -2097,7 +2114,7 @@ function hojaPrepUP(){
     f[17] = { t:'s', f:F_UP.R(r) };
     f[18] = { t:'s', f:F_UP.S(r) };
     f[19] = { t:'n', f:F_UP.T(r) };
-    f[20] = { t:'n', f:F_UP.U(r), z:'#,##0.0000000000' };
+    f[20] = { t:'n', f:F_UP.U(r, anclaUP), z:'#,##0.0000000000' };
     const fV = F_UP.V(r), fW = F_UP.W(r);
     f[21] = fV ? { t:'n', f:fV } : celda('');
     f[22] = fW ? { t:'s', f:fW } : celda('');
