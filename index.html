@@ -192,9 +192,11 @@
       </summary>
       <p class="sub" style="margin:10px 0 14px">
         No hace falta que las toques: ya están cargadas y quedan guardadas en este navegador. Abrí esto
-        sólo si cambiás alguna —por ejemplo el divisor de la P según los días del mes—, y acordate de
+        sólo si cambiás alguna, y acordate de
         tocar <b>Guardar fórmulas</b>. Van escritas para <b>una fila</b>; el procesador le cambia el
-        número en cada línea de factura.
+        número en cada línea de factura. Si una referencia lleva <b>$</b> delante de la fila
+        (<code>T$10</code>), apunta a la <b>primera línea de la factura</b>, que es donde están la fecha de
+        inicio y los demás datos de cabecera.
       </p>
       <div id="listaFormulas"></div>
       <div class="row" style="margin-top:14px">
@@ -408,8 +410,14 @@
           <li><b>UP · Descuento</b> y <b>UP · Nota interna</b> — las de la hoja de upgrades, que buscan
               por <code>M&amp;R</code> y terminan en <code>/UP</code>.</li>
           <li><b>P · Precio unitario</b> — tu <code>BUSCARV</code> contra la hoja <b>Info</b>. El número de
-              columna es el que elige el divisor: <b>5</b> es "V. Diario 30 D" y <b>6</b> es "V. Diario 31 D".
-              Cambialo según el mes que estés facturando.</li>
+              columna elige el divisor: <b>5</b> es "V. Diario 30 D" y <b>6</b> es "V. Diario 31 D". Ya no hace
+              falta que lo cambies a mano: la fórmula mira los días que cobró Dash <i>y</i> la fecha de inicio
+              del período, que está en la primera línea de cada factura (por eso la referencia va como
+              <code>T$</code>). Usa la <b>6</b> cuando son 31 días, y también cuando el período arranca después
+              del día 1 en un mes de 31 —ahí Dash prorratea dividiendo por 31 aunque cobre 30 días—. En el resto
+              usa la <b>5</b>, incluidos trimestrales, semestrales y anuales. En un mismo período conviven las
+              dos. <b>Febrero todavía no está contemplado</b>: su divisor de 28 está en la columna K de Info y
+              el BUSCARV llega hasta la G.</li>
           <li><b>R · Descuento</b> — la que busca <code>Z&amp;AK</code> en tu Tabla de promociones.</li>
           <li><b>S · Nota interna</b> — promo individual / ID de dash / tipo de descuento / letra de frecuencia.</li>
           <li><b>Y · Validación de importe</b> — <code>N*P*(1-R/100)*1,21</code>. En los clientes exentos el
@@ -1679,8 +1687,8 @@ const F_CALC = {
    ======================================================================= */
 const RUTA_TABLA = "'G:\\Unidades compartidas\\ADMINISTRACION\\Odoo\\[Tabla de promociones.xlsx]Tabla'!$D:$K";
 const FORMULAS_DEF = [
-  { clave:'P', col:'P', idx:15, tipo:'n', nombre:'Precio unitario — la columna elige el divisor: 5 = 30 días, 6 = 31 días',
-    f:'=+VLOOKUP(J10,Info!$A:$G,5,0)' },
+  { clave:'P', col:'P', idx:15, tipo:'n', nombre:'Precio unitario — el divisor sale del período de cada factura (T$ es la primera línea): columna 6 (31 días) cuando son 31 días, o cuando el período arranca después del día 1 en un mes de 31; columna 5 (30 días) en el resto, incluidos trimestrales, semestrales y anuales',
+    f:'=+VLOOKUP(J10,Info!$A:$G,IF(AND(N10<=31,OR(N10=31,AND(DAY(T$10)>1,DAY(DATE(YEAR(T$10),MONTH(T$10)+1,0))=31))),6,5),0)' },
   { clave:'R', col:'R', idx:17, tipo:'n', nombre:'Descuento (%)',
     f:'=IFERROR(IF(AA10="Suscripción",VLOOKUP(Z10&AK10,' + RUTA_TABLA + ',3,0),' +
       'IF(AA10="Mensual",VLOOKUP(Z10&AK10,' + RUTA_TABLA + ',2,0),' +
@@ -1729,19 +1737,36 @@ try {
       return Object.assign({}, d, v ? { f:v.f } : {});
     });
     if (g.filaBase) filaBase = Number(g.filaBase) || 10;
+    // Si la P guardada es una versión vieja del divisor, la pisamos con la de
+    // fábrica: así el arreglo del 30/31 llega aunque hayas guardado fórmulas.
+    const P_VIEJAS = [
+      '=+VLOOKUP(J10,Info!$A:$G,5,0)',
+      '=+VLOOKUP(J10,Info!$A:$G,6,0)',
+      '=+VLOOKUP(J10,Info!$A:$G,IF(N10=31,6,5),0)',
+      '=+VLOOKUP(J10,Info!$A:$G,IF(AND(N10<=31,OR(N10=31,DAY(T10)>1)),6,5),0)',
+      '=+VLOOKUP(J10,Info!$A:$G,IF(AND(N10<=31,OR(N10=31,DAY(T$10)>1)),6,5),0)'
+    ].map(s => s.replace(/\s+/g, ''));
+    const iP = formulas.findIndex(x => x.clave === 'P');
+    if (iP >= 0 && P_VIEJAS.indexOf(String(formulas[iP].f || '').replace(/^=?/, '=').replace(/\s+/g, '')) >= 0) {
+      formulas[iP] = Object.assign({}, FORMULAS_DEF.find(x => x.clave === 'P'));
+    }
   }
 } catch(e){}
 
 // Cambia las referencias a la fila de plantilla por la fila real. Sólo toca
 // números pegados a una letra de columna: AA10 sí, los argumentos del VLOOKUP no.
-function aFila(formula, base, destino){
-  const re = new RegExp('(\\$?[A-Za-z]{1,3}\\$?)(' + base + ')(?![0-9])', 'g');
-  return String(formula || '').replace(/^=/, '').replace(re, (m, col) => col + destino);
+// Si la referencia lleva $ delante de la fila (T$10) apunta a la primera línea
+// de la factura, donde están la fecha de inicio y el resto de los datos de
+// cabecera; sin el $ apunta a la línea que se está escribiendo.
+function aFila(formula, base, destino, ancla){
+  const re = new RegExp('(\\$?[A-Za-z]{1,3})(\\$?)(' + base + ')(?![0-9])', 'g');
+  return String(formula || '').replace(/^=/, '')
+    .replace(re, (m, col, abs) => col + abs + ((abs && ancla) ? ancla : destino));
 }
-function formulaDe(clave, fila){
+function formulaDe(clave, fila, ancla){
   const f = formulas.find(x => x.clave === clave);
   if (!f || !String(f.f).trim()) return null;
-  return aFila(f.f, filaBase, fila);
+  return aFila(f.f, filaBase, fila, ancla);
 }
 // Si la fórmula de la validación multiplica por 1,21, en los exentos hay que sacarlo
 function formulaValidacion(fila, exento){
@@ -1832,9 +1857,11 @@ function hojaImport(modo){
   const hdr = COLS_IMP.map(t => celda(t, SIN_COLOR));
   hdr[44] = celda('ID dash', SIN_COLOR);
   const aoa = [filaTitulo(), filaEtiquetas(), filaDeFormulas(), [], hdr];
+  let anclaRG = FILA_1;                   // primera línea de la factura en curso
   resultado.lineas.forEach((l, i) => {
     const r = i + FILA_1;                 // fila de Excel
     const p = l.esPrimera;
+    if (p) anclaRG = r;
     const mult = l.exento ? '' : '*1.21';
     const f = [];
     f[0]  = celda(l.orden);
@@ -1853,7 +1880,7 @@ function hojaImport(modo){
     f[12] = celda(l.analitica);
     f[13] = celda(l.cantidad);
     f[14] = celda(l.impuestos);
-    const fP = formulaDe('P', r);
+    const fP = formulaDe('P', r, anclaRG);
     f[15] = fP ? { t:'n', f:fP, z:'#,##0.0000000000' }
                : (l.precio === null ? celda('', ROJO) : celda(l.precio, { z:'#,##0.0000000000' }));
     f[16] = celda(l.udm);
