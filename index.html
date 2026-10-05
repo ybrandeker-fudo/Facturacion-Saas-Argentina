@@ -1703,18 +1703,24 @@ const FORMULAS_DEF = [
   { clave:'Y', col:'Y', idx:24, tipo:'n', nombre:'Validación de importe',
     f:'=+N10*P10*(1-(R10/100))*1.21' },
   // --- las dos de la hoja "Preparación CP" (cambios de plan) ---
+  // Si la Tabla devuelve SP —esa línea no tiene promo individual— y M es un
+  // número, el descuento es el de suscripción que ya trae M. Sin esto gana el
+  // 5% genérico de la fila SP y se pierde el 0 que cobró Dash.
   { clave:'cpW', col:'W', hoja:'cp', idx:22, tipo:'n', nombre:'CP · Descuento',
-    f:'=IFERROR(IF(L10="Suscripción",VLOOKUP(AC10,' + RUTA_TABLA + ',3,0),' +
+    f:'=IF(AND(ISNUMBER(M10),IFERROR(VLOOKUP(AC10,' + RUTA_TABLA + ',8,0),"SP")="SP"),M10,' +
+      'IFERROR(IF(L10="Suscripción",VLOOKUP(AC10,' + RUTA_TABLA + ',3,0),' +
       'IF(L10="Mensual",VLOOKUP(AC10,' + RUTA_TABLA + ',2,0),' +
       'IF(L10="Trimestral",VLOOKUP(AC10,' + RUTA_TABLA + ',4,0),' +
       'IF(L10="Semestral",VLOOKUP(AC10,' + RUTA_TABLA + ',5,0),' +
-      'VLOOKUP(AC10,' + RUTA_TABLA + ',6,0))))),M10)' },
+      'VLOOKUP(AC10,' + RUTA_TABLA + ',6,0))))),M10))' },
+  // Mismo criterio que en CP: SP + M numérico → manda el dto de suscripción.
   { clave:'upV', col:'V', hoja:'up', idx:21, tipo:'n', nombre:'UP · Descuento',
-    f:'=IFERROR(IF(L10="Suscripción",VLOOKUP(AB10,' + RUTA_TABLA + ',3,0),' +
+    f:'=IF(AND(ISNUMBER(M10),IFERROR(VLOOKUP(AB10,' + RUTA_TABLA + ',8,0),"SP")="SP"),M10,' +
+      'IFERROR(IF(L10="Suscripción",VLOOKUP(AB10,' + RUTA_TABLA + ',3,0),' +
       'IF(L10="Mensual",VLOOKUP(AB10,' + RUTA_TABLA + ',2,0),' +
       'IF(L10="Trimestral",VLOOKUP(AB10,' + RUTA_TABLA + ',4,0),' +
       'IF(L10="Semestral",VLOOKUP(AB10,' + RUTA_TABLA + ',5,0),' +
-      'VLOOKUP(AB10,' + RUTA_TABLA + ',6,0))))),M10)' },
+      'VLOOKUP(AB10,' + RUTA_TABLA + ',6,0))))),M10))' },
   { clave:'upW', col:'W', hoja:'up', idx:22, tipo:'s', nombre:'UP · Nota interna',
     f:'=IFERROR(VLOOKUP(AB10,' + RUTA_TABLA + ',8,0),"SP")&"/"&N10&"/"&' +
       'IFERROR(VLOOKUP(AB10,' + RUTA_TABLA + ',7,0),IF(OR(M10=0,M10=5,M10=10,M10=15),"B","A"))&"/"&' +
@@ -1737,19 +1743,40 @@ try {
       return Object.assign({}, d, v ? { f:v.f } : {});
     });
     if (g.filaBase) filaBase = Number(g.filaBase) || 10;
-    // Si la P guardada es una versión vieja del divisor, la pisamos con la de
-    // fábrica: así el arreglo del 30/31 llega aunque hayas guardado fórmulas.
-    const P_VIEJAS = [
-      '=+VLOOKUP(J10,Info!$A:$G,5,0)',
-      '=+VLOOKUP(J10,Info!$A:$G,6,0)',
-      '=+VLOOKUP(J10,Info!$A:$G,IF(N10=31,6,5),0)',
-      '=+VLOOKUP(J10,Info!$A:$G,IF(AND(N10<=31,OR(N10=31,DAY(T10)>1)),6,5),0)',
-      '=+VLOOKUP(J10,Info!$A:$G,IF(AND(N10<=31,OR(N10=31,DAY(T$10)>1)),6,5),0)'
-    ].map(s => s.replace(/\s+/g, ''));
-    const iP = formulas.findIndex(x => x.clave === 'P');
-    if (iP >= 0 && P_VIEJAS.indexOf(String(formulas[iP].f || '').replace(/^=?/, '=').replace(/\s+/g, '')) >= 0) {
-      formulas[iP] = Object.assign({}, FORMULAS_DEF.find(x => x.clave === 'P'));
-    }
+    // Si una fórmula guardada es una versión vieja conocida, la pisamos con la
+    // de fábrica: así los arreglos llegan aunque hayas guardado fórmulas.
+    const sinEspacios = t => String(t || '').replace(/^=?/, '=').replace(/\s+/g, '');
+    const T_ = RUTA_TABLA;
+    const VIEJAS = {
+      P: [
+        '=+VLOOKUP(J10,Info!$A:$G,5,0)',
+        '=+VLOOKUP(J10,Info!$A:$G,6,0)',
+        '=+VLOOKUP(J10,Info!$A:$G,IF(N10=31,6,5),0)',
+        '=+VLOOKUP(J10,Info!$A:$G,IF(AND(N10<=31,OR(N10=31,DAY(T10)>1)),6,5),0)',
+        '=+VLOOKUP(J10,Info!$A:$G,IF(AND(N10<=31,OR(N10=31,DAY(T$10)>1)),6,5),0)'
+      ],
+      cpW: [
+        '=IFERROR(IF(L10="Suscripción",VLOOKUP(AC10,' + T_ + ',3,0),' +
+        'IF(L10="Mensual",VLOOKUP(AC10,' + T_ + ',2,0),' +
+        'IF(L10="Trimestral",VLOOKUP(AC10,' + T_ + ',4,0),' +
+        'IF(L10="Semestral",VLOOKUP(AC10,' + T_ + ',5,0),' +
+        'VLOOKUP(AC10,' + T_ + ',6,0))))),M10)'
+      ],
+      upV: [
+        '=IFERROR(IF(L10="Suscripción",VLOOKUP(AB10,' + T_ + ',3,0),' +
+        'IF(L10="Mensual",VLOOKUP(AB10,' + T_ + ',2,0),' +
+        'IF(L10="Trimestral",VLOOKUP(AB10,' + T_ + ',4,0),' +
+        'IF(L10="Semestral",VLOOKUP(AB10,' + T_ + ',5,0),' +
+        'VLOOKUP(AB10,' + T_ + ',6,0))))),M10)'
+      ]
+    };
+    Object.keys(VIEJAS).forEach(clave => {
+      const lista = VIEJAS[clave].map(sinEspacios);
+      const i = formulas.findIndex(x => x.clave === clave);
+      if (i >= 0 && lista.indexOf(sinEspacios(formulas[i].f)) >= 0) {
+        formulas[i] = Object.assign({}, FORMULAS_DEF.find(x => x.clave === clave));
+      }
+    });
   }
 } catch(e){}
 
