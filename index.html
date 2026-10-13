@@ -2130,8 +2130,12 @@ const F_UP = {
   // El divisor se elige igual que en la P de los regulares: 31 días cuando son
   // 31, o cuando el período arranca después del día 1 en un mes de 31. La fecha
   // de inicio está en la primera línea de la factura (la fila "a").
+  // Lo que manda no es la cantidad de días sino la FRECUENCIA: una mensual o una
+  // suscripción se prorratea con la tarifa del mes de arranque aunque el período
+  // dure 55, 84 u 85 días. Trimestral, semestral y anual van siempre a la 5.
   U: (r, a) => {
-    const col = 'IF(AND(T' + r + '<=31,OR(T' + r + '=31,AND(DAY(P' + a + ')>1,' +
+    const col = 'IF(AND(OR(T' + r + '<=31,L' + a + '="Mensual",L' + a + '="Suscripción"),' +
+                'OR(T' + r + '=31,AND(DAY(P' + a + ')>1,' +
                 'DAY(DATE(YEAR(P' + a + '),MONTH(P' + a + ')+1,0))=31))),6,5)';
     return 'VLOOKUP(H' + r + ',Info!$A:$G,' + col + ',0)-VLOOKUP(J' + r + ',Info!$A:$G,' + col + ',0)';
   },
