@@ -236,6 +236,7 @@
     <div class="scroll"><table id="tabla"></table></div>
     <div class="row" style="margin-top:14px">
       <button id="btnXlsx">Descargar Excel</button>
+      <button class="sec naranja hidden" id="btnCsvDash">CSV "pago hasta" para Dash</button>
       <span class="muted" id="nombreArchivo"></span>
     </div>
   </div>
@@ -470,11 +471,21 @@
           <li><b>Import Odoo</b> — sólo el encabezado, de la A a la U. Ahí vas pegando vos a medida que
               terminás RG, CP y UP. El número de Orden sigue corriendo entre los tres, así no se repite
               ninguno cuando los juntás.</li>
+          <li><b>Import Odoo</b> — la hoja que se importa, con los regulares, los cambios de plan y
+              los upgrades uno abajo del otro y la numeración corrida. Se copia de la A a la U y se pega
+              derecho; lo calculado mira a las hojas de preparación, así que si corregís una fórmula allá,
+              acá se actualiza.</li>
+          <li><b>Import Terminales</b> — lo mismo para las terminales, en hoja aparte porque se importan
+              por separado. Mismas 21 columnas, con la J (Plancito) vacía: una terminal no tiene plan.</li>
           <li><b>Preparación RG</b> — los regulares con todo el andamiaje: de la A a la AK más el ID de
               Dash en AS. Arriba lleva el bloque de fórmulas: <b>fila 1</b> el título, <b>fila 2</b> una
               etiqueta por columna que dice a qué celda va cada una (<code>▼ R6</code>),
               <b>fila 3</b> las fórmulas, <b>fila 4</b> vacía, <b>fila 5</b> los encabezados y los datos
-              desde la <b>fila 6</b>. Los <code>#N/A</code> de la fila 3 son normales.</li>
+              desde la <b>fila 6</b>. Los <code>#N/A</code> de la fila 3 son normales. En la fila 2, sobre
+              la columna X, va <b>No cierran</b>: cuántas facturas tienen una diferencia entre el importe
+              cobrado y la suma de la validación de sus líneas. Se actualiza solo. Las que no cierran
+              quedan además con la celda del importe pintada en amarillo, para encontrarlas de un vistazo
+              entre todas las filas.</li>
           <li>En <b>Preparación CP</b> y <b>Preparación UP</b>, a la derecha de tus columnas, van dos
               auxiliares: <b>Promos del historial</b> (la lista completa tal cual la trae el historial) y
               <b>Clave</b>, que es contra lo que buscan el descuento y la nota. La Clave prueba primero con
@@ -487,6 +498,11 @@
           <li><b>Preparación UP</b> — los upgrades con tus columnas de la A a la Z. Se cobra sólo lo que
               se sumó: si es un módulo va entero y el plan viejo queda en "Ninguno"; si es un plan base,
               va la diferencia contra el plan anterior. La nota termina en <code>/UP</code>.</li>
+          <li><b>Pagos duplicados</b> — sólo si hubo. Por cada cliente que pagó dos veces el mismo
+              período: qué vino, con qué período quedó la factura, cómo cambiaron los términos y
+              condiciones y qué <b>"pago hasta"</b> hay que dejar en Dash. Esa última columna también se
+              baja como CSV con el botón de al lado del Excel, con el formato de la plantilla
+              <i>Importar fecha de pago hasta</i>.</li>
           <li><b>Fórmulas</b> — las que cargaste y cómo sale lo demás.</li>
           <li><b>Info</b> — la tabla de precios y la de condiciones, contra la que buscan las fórmulas.</li>
           <li><b>Analisis facturacion</b> — igual que la de tu archivo de preparación: las mismas 25
@@ -573,6 +589,14 @@
   const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
                  'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
   function diasDelMes(d) { return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate(); }
+  const FREC_MES = { 'Mensual':1, 'Suscripción':1, 'Suscripcion':1 };
+  function divisorDe(r) {
+    if (!r.inicio) return 30;
+    const dias = num(r.dias);
+    const esDeUnMes = dias <= 31 || !!FREC_MES[txt(r.frecuencia)];
+    const arrancaDespues = r.inicio.getUTCDate() > 1 && diasDelMes(r.inicio) === 31;
+    return (esDeUnMes && (dias === 31 || arrancaDespues)) ? 31 : 30;
+  }
   // Los términos van con el mes de inicio. El rango sólo cuando el cobro cubre
   // más de un mes de verdad (trimestral, semestral, anual): un mensual que
   // arranca el 1 y a Dash le figura el fin en el mes siguiente sigue siendo el
@@ -923,6 +947,76 @@
       aviso('ok', partidos.length + ' cliente(s) pagaron la misma suscripción con más de un medio de pago: ' +
         'Mercado Pago los trae separados y los uní en una sola factura con la suma.', partidos);
 
+    /* ------ 1c. pagos duplicados del mismo cliente ------
+       Si el mismo ID de cuenta de Dash pagó dos veces y el segundo período pisa
+       al primero, Dash movió el "pago hasta" pero dejó el inicio donde estaba.
+       El importe es el que cobró Mercado Pago y NO se toca: lo que se corrige es
+       la fecha de inicio, que pasa a ser el día siguiente al fin del pago
+       anterior. Con el inicio se recalculan los términos y condiciones (el mes
+       que va en la factura) y las fechas de servicio de ARCA.
+
+       El control mira TODO el historial, no sólo los cobros de esta corrida:
+       el primer pago del cliente puede haberse facturado hace tres días y el
+       duplicado recién aparecer hoy. Por eso el historial se baja del 1ro del
+       mes hasta el día que se está facturando. */
+    const pagosDuplicados = [];
+    (function(){
+      const DIA = 86400000;
+      const t = d => (d instanceof Date) ? d.getTime() : null;
+      const porCuenta = new Map();
+      (entrada.historial || []).forEach(h => {
+        if (!/^pago regular$/i.test(txt(h[cH.accion]))) return;
+        if (num(h[cH.importe]) <= 0) return;
+        const c = clave(h[cH.idCuenta]); if (!c) return;
+        const ini = aFecha(h[cH.inicio]), fin = aFecha(h[cH.fin]);
+        if (!ini || !fin) return;
+        if (!porCuenta.has(c)) porCuenta.set(c, []);
+        porCuenta.get(c).push({ ini:t(ini), fin:t(fin), ref:clave(h[cH.externo]),
+          idPago:clave(h[cH.idPago]), dto:num(h[cH.dtoLargo]), importe:num(h[cH.importe]) });
+      });
+      regulares.forEach(act => {
+        if (!act.dash || !t(act.inicio) || !t(act.fin)) return;
+        // el pago anterior es, entre los que terminan antes que éste, el que termina más tarde
+        let ant = null;
+        (porCuenta.get(act.dash) || []).forEach(p => {
+          if (p.fin >= t(act.fin)) return;
+          if (!ant || p.fin > ant.fin) ant = p;
+        });
+        if (!ant) return;
+        if (t(act.inicio) > ant.fin) return;                 // no se pisan: está bien
+        const nuevoIni = new Date(ant.fin + DIA);
+        const terminosViejo = act.terminos;
+        const caso = {
+          dash: act.dash, desc: act.descripcion, contacto: act.contacto,
+          refAnterior: ant.ref, finAnterior: new Date(ant.fin),
+          dtoAnterior: ant.dto, dtoDuplicado: act.dtoLargo,
+          ref: act.refMP, inicioVino: act.inicio, fin: act.fin,
+          importe: act.importe, dias: act.dias,
+          inicioNuevo: nuevoIni, corregido: t(nuevoIni) <= t(act.fin),
+          terminosViejo: terminosViejo, terminosNuevo: terminosViejo,
+          mesRepetido: false, pagoHasta: new Date(Math.max(ant.fin, t(act.fin)))
+        };
+        pagosDuplicados.push(caso);
+        if (!caso.corregido) return;                         // no se puede acomodar: sólo aviso
+        act.inicio = nuevoIni;
+        act.terminos = terminos(nuevoIni, act.fin, act.dias + act.diasViejo);
+        caso.terminosNuevo = act.terminos;
+        caso.mesRepetido = terminosViejo === act.terminos;
+      });
+    })();
+    if (pagosDuplicados.length) {
+      const corr = pagosDuplicados.filter(d => d.corregido).length;
+      const rep  = pagosDuplicados.filter(d => d.mesRepetido).length;
+      aviso(corr === pagosDuplicados.length && !rep ? 'ok' : 'warn',
+        pagosDuplicados.length + ' cliente(s) pagaron dos veces el mismo período: le corrí el inicio del ' +
+        'segundo pago al día siguiente del anterior, recalculé los términos y las fechas de ARCA, ' +
+        'y dejé el importe como lo cobró Mercado Pago' +
+        (corr === pagosDuplicados.length ? '.' : ' (' + (pagosDuplicados.length - corr) + ' no se pudieron acomodar: miralos a mano).') +
+        (rep ? ' ' + rep + ' quedaron con el mismo mes en los términos y condiciones que el pago anterior: revisalos.' : '') +
+        ' Mirá la hoja "Pagos duplicados"; el "pago hasta" para Dash lo bajás con el botón CSV.',
+        pagosDuplicados);
+    }
+
     /* ------------------------------------------- 2. explotar en líneas */
     const lineas = [];
     const pendientesDto = [];
@@ -934,7 +1028,12 @@
       const cond = buscarCond(r.condicion) || ['', '', ''];
       const tipoDoc = cond[0], diario = cond[1], impuesto = cond[2];
       const exento = impuesto === 'IVA Exento';
-      const divisor = r.inicio ? diasDelMes(r.inicio) : 30;
+      // Mismo criterio que la fórmula P de la hoja: la tarifa de 31 días sólo
+      // cuando el cobro es de un mes (mensual o suscripción, o 31 días o menos) Y
+      // además son 31 días o el período arranca después del 1 en un mes de 31.
+      // Trimestral, semestral y anual van siempre a la de 30. Si acá no se elige
+      // igual, el control interno marca diferencias que en el Excel no existen.
+      const divisor = divisorDe(r);
       const V = r.tokens.length - 1;
       const letra = LETRA_FREC[r.frecuencia] || 'A';
       const zTxt = txt(r.otroDescuento);
@@ -1246,6 +1345,7 @@
         desvios: desvios,
         planesRaros: planesRaros,
         partidos: partidos,
+        pagosDuplicados: pagosDuplicados,
         sinCondicion: sinCondicion,
         sinNombre: sinNombre,
         conTabla: promos.size,
@@ -1420,11 +1520,9 @@ function pintar(){
   $('#kpis').innerHTML = [
     ['Cobros leídos', fmtEnt(c.cobrosExtracto), ''],
     ['Regulares', fmtEnt(c.regulares), 'acento'],
-    ['Líneas de factura', fmtEnt(c.lineasFact), 'acento'],
     ['Líneas de cambio de plan', fmtEnt(c.lineasCP), 'acento'],
     ['Líneas de upgrade', fmtEnt(c.lineasUP), 'acento'],
     ['Terminales FP', fmtEnt((resultado.term && resultado.term.lineas.filter(l => l.esPrimera).length) || 0), 'acento'],
-    ['Fuera de regulares', fmtEnt(c.excluidos.length), ''],
     ['Total a facturar', '$ ' + fmt(c.totalRegulares), 'acento']
   ].map(([l,v,cl]) => '<div class="kpi ' + cl + '"><div class="l">' + l + '</div><div class="v">' + v + '</div></div>').join('');
 
@@ -1482,6 +1580,10 @@ function pintar(){
   armarTabs();
   $('#cTabs').classList.remove('hidden');
   $('#nombreArchivo').textContent = nombreSalida();
+  // el CSV de Dash sólo tiene sentido si hubo pagos duplicados que se pudieron acomodar
+  const hayDup = (resultado.control.pagosDuplicados || []).filter(d => d.corregido).length;
+  $('#btnCsvDash').classList.toggle('hidden', !hayDup);
+  if (hayDup) $('#btnCsvDash').textContent = 'CSV "pago hasta" para Dash (' + hayDup + ')';
 }
 
 /* Cuadre explícito: cada cobro del extracto cae en Regulares o en un motivo.
@@ -1647,9 +1749,9 @@ function hojaAnalisis(){
     aoa.push([
       celda(r.fechaMov), celda(r.descripcion), celda(numOTexto(r.contacto)),
       // los IDs de 12 dígitos van con formato 0: si no, Excel los muestra como 1,8E+11
-      celda("'" + r.refMP), celda(numOTexto(r.refMP), { z:ENTERO }), celda(r.importe, { z:N2 }),
+      celda("'" + r.refMP), celda("'" + r.refMP), celda(r.importe, { z:N2 }),
       celda(r.item), celda(r.razon), celda(r.plataforma),
-      celda(numOTexto(r.refHistorial), { z:ENTERO }),
+      celda(r.refHistorial === '' ? '' : "'" + r.refHistorial),
       celda(dif, Object.assign({ z:N2 }, dif === 0 ? null : ROJO)),
       celda(r.planViejo), celda(r.diasViejo), celda(r.planNuevo), celda(r.dias),
       celda(r.promoNombres), celda(r.dtoPromos), celda(r.dtoLargo), celda(r.accion),
@@ -1692,7 +1794,7 @@ const COLS_IMP = ['Orden','Contacto/ID de la DB','Referencia','Fecha de Factura/
   'Solo Plan o módulo'];
 // las columnas que llevan fórmula van con un mínimo de 10 para que entre la etiqueta
 const ANCHO_IMP = [7,12,15,12,13,18,22,17,29,12,15,21,20,9,13,12,12,17,40,10,14,13,11,13,12,17,17,
-  26,16,8,7,10,7,8,8,10,10,13,17,12,17,11,13,36,18];
+  26,16,8,7,10,7,8,8,10,10,13,17,12,17,11,13,36,18,11];
 
 // La hoja "Import Odoo" es la que subís: las mismas columnas que tu archivo,
 // sin Plancito y con el nombre técnico de la distribución analítica.
@@ -1900,6 +2002,16 @@ const FORM_F = { s:{ fill:{ patternType:'solid', fgColor:{ rgb:'FFEEE9' } },
   font:{ color:{ rgb:'071D37' }, name:'Barlow' },
   alignment:{ vertical:'center' } } };
 
+// Check de la factura: la suma de la validación (Y) de todas las líneas de esa
+// orden contra el importe cobrado (X), que vive en la primera línea. Mismo
+// criterio que las columnas Check de CP y UP, con criterio de una sola celda.
+function formulaCheckRG(r){
+  // El IFERROR es por las promos que todavía no estén cargadas en tu Tabla: ahí
+  // la Y da error y la factura tampoco cierra, así que va REVISAR igual.
+  return 'IFERROR(IF(ROUND(SUMIF($A:$A,$A' + r + ',$Y:$Y),0)=ROUND(VLOOKUP($A' + r +
+         ',$A:$X,24,0),0),"ok","REVISAR"),"REVISAR")';
+}
+
 // Qué fórmula va en cada columna del bloque: índice, letra y nombre corto.
 function bloqueFormulas(){
   return [
@@ -1909,12 +2021,13 @@ function bloqueFormulas(){
     { i:17, col:'R',  nombre:'Descuento',     f:formulaDe('R', FILA_FORM), t:'n' },
     { i:18, col:'S',  nombre:'Nota interna',  f:formulaDe('S', FILA_FORM), t:'s' },
     { i:24, col:'Y',  nombre:'Validación',    f:formulaValidacion(FILA_FORM, false), t:'n' },
-    { i:36, col:'AK', nombre:'Solo plan/mód.', f:F_CALC.AK(FILA_FORM), t:'s' }
+    { i:36, col:'AK', nombre:'Solo plan/mód.', f:F_CALC.AK(FILA_FORM), t:'s' },
+    { i:45, col:'AT', nombre:'Check',           f:formulaCheckRG(FILA_FORM), t:'s' }
   ].filter(x => x.f);
 }
 function filaTitulo(){
   const f = [];
-  for (let c = 0; c < 45; c++) f[c] = celda('', c < 4 ? TITULO_F : NOTA_F);
+  for (let c = 0; c < 46; c++) f[c] = celda('', c < 4 ? TITULO_F : NOTA_F);
   f[0] = celda('FÓRMULAS', TITULO_F);
   f[4] = celda('Cada fórmula está escrita para la fila ' + FILA_FORM + '. Copiá la celda y pegala desde la ' +
     'fila ' + FILA_1 + ' hacia abajo: las referencias se acomodan solas. Los #N/A de acá arriba son ' +
@@ -1923,7 +2036,7 @@ function filaTitulo(){
 }
 function filaEtiquetas(){
   const f = [];
-  for (let c = 0; c < 45; c++) f[c] = celda('', ETIQ_F);
+  for (let c = 0; c < 46; c++) f[c] = celda('', ETIQ_F);
   // etiqueta corta, para que entre aunque la columna sea angosta: la dice a
   // qué celda va la fórmula de abajo
   bloqueFormulas().forEach(x => { f[x.i] = celda('▼ ' + x.col + FILA_1, ETIQ_F); });
@@ -1931,7 +2044,7 @@ function filaEtiquetas(){
 }
 function filaDeFormulas(){
   const f = [];
-  for (let c = 0; c < 45; c++) f[c] = celda('', FORM_F);
+  for (let c = 0; c < 46; c++) f[c] = celda('', FORM_F);
   bloqueFormulas().forEach(x => { f[x.i] = { t:x.t, f:x.f, s:FORM_F.s }; });
   return f;
 }
@@ -1939,6 +2052,7 @@ function hojaImport(modo){
   // el encabezado va plano, como en tu hoja "Import odoo - Saas"
   const hdr = COLS_IMP.map(t => celda(t, SIN_COLOR));
   hdr[44] = celda('ID dash', SIN_COLOR);
+  hdr[45] = celda('Check', SIN_COLOR);
   const aoa = [filaTitulo(), filaEtiquetas(), filaDeFormulas(), [], hdr];
   let anclaRG = FILA_1;                   // primera línea de la factura en curso
   resultado.lineas.forEach((l, i) => {
@@ -1984,6 +2098,7 @@ function hojaImport(modo){
     for (let k = 0; k < 8; k++) f[28 + k] = celda(l.tokens[k] || '');
     f[36] = { t:'s', f:F_CALC.AK(r) };
     f[44] = celda(numOTexto(l.dash));
+    f[45] = { t:'s', f:formulaCheckRG(r) };
     aoa.push(f);
   });
   const ws = hojaDesde(aoa, ANCHO_IMP);
@@ -2468,7 +2583,7 @@ function filasImportUP(desde){
       p ? celda(l.fecha) : celda(''),
       p ? celda(l.fecha) : celda(''),
       p ? celda("'" + l.refMP) : celda(''),
-      celda(l.terminos),
+      p ? celda(l.terminos) : celda(''),
       p ? celda(cd[1]) : celda(''),
       p ? celda(cd[0]) : celda(''),
       { t:'s', f:P('S') },
@@ -2538,10 +2653,10 @@ function filasImportCP(desde){
   return aoa;
 }
 // los regulares, en orden de import, mirando a la hoja Preparación RG
-function hojaImportRG(){
-  const aoa = [encabezadoImport()];
+function filasImportRG(desde){
+  const aoa = [];
   resultado.lineas.forEach((l, i) => {
-    const r = i + 2, rp = i + FILA_1;
+    const r = i + desde, rp = i + FILA_1;
     const P = c => "'Preparación RG'!" + c + rp;
     const p = l.esPrimera;
     aoa.push([
@@ -2564,13 +2679,51 @@ function hojaImportRG(){
       p ? celda(l.fin) : celda('')
     ]);
   });
-  return cerrarImport(aoa);
+  return aoa;
 }
-// una sola hoja con los cambios de plan y los upgrades, en ese orden
-function hojaImportCPUP(){
-  const cp = filasImportCP(2);
-  const up = filasImportUP(2 + cp.length);
-  return cerrarImport([encabezadoImport()].concat(cp, up));
+
+/* La hoja "Import Odoo": regulares, cambios de plan y upgrades uno abajo del
+   otro, con la numeración corrida tal como la usa Odoo. Se copia de la A a la U
+   y se pega derecho. Las terminales van en su propia hoja porque se importan
+   aparte. */
+function hojaImportSaas(){
+  const rg = filasImportRG(2);
+  const cp = filasImportCP(2 + rg.length);
+  const up = filasImportUP(2 + rg.length + cp.length);
+  return cerrarImport([encabezadoImport()].concat(rg, cp, up));
+}
+
+// Las terminales, en el mismo formato de 21 columnas: la J (Plancito) va vacía
+// porque una terminal no tiene plan. El precio y el descuento miran a
+// "Preparación Terminales", así que si corregís uno allá, acá se actualiza.
+function hojaImportTerm(){
+  const aoa = [encabezadoImport()];
+  (resultado.lineasTerm || []).forEach((l, i) => {
+    const rp = i + TERM_1;
+    const P = c => "'Preparación Terminales'!" + c + rp;
+    const p = l.esPrimera;
+    aoa.push([
+      celda(l.orden),
+      p ? celda(numOTexto(l.contacto)) : celda(''),
+      p ? celda(l.referencia) : celda(''),
+      p ? celda(l.fecha) : celda(''),
+      p ? celda(l.fecha) : celda(''),
+      p ? celda("'" + l.refPago) : celda(''),
+      p ? celda(l.terminos) : celda(''),
+      p ? celda(l.diario) : celda(''),
+      p ? celda(l.tipoDoc) : celda(''),
+      celda(''),                                             // J  Plancito: no aplica
+      celda(l.producto), celda(l.cuenta), celda(l.analitica),
+      celda(l.cantidad), celda(l.impuestos),
+      { t:'n', f:P('O'), z:'#,##0.0000000000' },             // P  Precio unitario
+      celda(l.udm),
+      { t:'n', f:P('Q') },                                   // R  Descuento
+      celda(''),                                             // S  Nota interna
+      p ? celda(l.inicio) : celda(''),
+      p ? celda(l.fin) : celda('')
+    ]);
+  });
+  return cerrarImport(aoa);
 }
 
 
@@ -2713,6 +2866,62 @@ function hojaFormulas(){
   return hojaDesde(aoa, [34, 110, 10]);
 }
 
+// Los clientes que pagaron dos veces el mismo período: qué vino, qué quedó en la
+// factura y qué "pago hasta" hay que dejar en Dash.
+const ANCHO_DUP = [14, 30, 14, 18, 12, 13, 18, 24, 24, 13, 20, 20, 24];
+function hojaDuplicados(){
+  const ds = (resultado.control.pagosDuplicados || []);
+  const aoa = [
+    [celda('Pagos duplicados · período corregido, términos y "pago hasta" de Dash', AZUL_HDR)].concat(
+      Array(ANCHO_DUP.length - 1).fill(0).map(() => celda('', AZUL_HDR))),
+    ['ID de Dash', 'Cliente', 'Contacto Odoo', 'Pago anterior', 'Termina', 'Dto. anterior',
+     'Pago duplicado', 'Período que vino', 'Período facturado', 'Dto. duplicado',
+     'Términos · antes', 'Términos · ahora', '"Pago hasta" que va en Dash'].map(x => celda(x, HDR2))
+  ];
+  if (!ds.length) {
+    aoa.push([celda('No hubo pagos duplicados en esta corrida.')]);
+    return hojaDesde(aoa, ANCHO_DUP);
+  }
+  const f = d => d instanceof Date
+    ? String(d.getUTCDate()).padStart(2, '0') + '/' + String(d.getUTCMonth() + 1).padStart(2, '0') +
+      '/' + d.getUTCFullYear()
+    : '';
+  ds.forEach(d => {
+    aoa.push([
+      celda(d.dash), celda(d.desc), celda(d.contacto),
+      celda("'" + d.refAnterior), celda(d.finAnterior), celda(d.dtoAnterior),
+      celda("'" + d.ref),
+      celda(f(d.inicioVino) + ' → ' + f(d.fin)),
+      celda(d.corregido ? f(d.inicioNuevo) + ' → ' + f(d.fin) : 'SIN CORREGIR', d.corregido ? null : AMARILLO),
+      celda(d.dtoDuplicado, d.dtoAnterior !== d.dtoDuplicado ? AMARILLO : null),
+      celda(d.terminosViejo),
+      celda(d.terminosNuevo, d.mesRepetido ? AMARILLO : null),
+      celda(d.pagoHasta)
+    ]);
+  });
+  return hojaDesde(aoa, ANCHO_DUP);
+}
+
+/* El CSV que toma Dash para mover el "pago hasta": dos columnas, ID y fecha
+   en formato ISO, igual que la plantilla "Importar fecha de pago hasta". */
+function csvPagoHasta(){
+  const ds = (resultado.control.pagosDuplicados || []).filter(d => d.corregido);
+  const iso = d => d instanceof Date
+    ? d.getUTCFullYear() + '-' + String(d.getUTCMonth() + 1).padStart(2, '0') + '-' +
+      String(d.getUTCDate()).padStart(2, '0')
+    : '';
+  // una fila por cuenta, con la fecha más lejana si el cliente pagó más de dos veces
+  const porCuenta = new Map();
+  ds.forEach(d => {
+    const v = porCuenta.get(d.dash);
+    if (!v || v < d.pagoHasta.getTime()) porCuenta.set(d.dash, d.pagoHasta.getTime());
+  });
+  const filas = ['ID,Pago hasta'];
+  porCuenta.forEach((ts, dash) => filas.push(dash + ',' + iso(new Date(ts))));
+  return filas.join('\n') + '\n';
+}
+
+
 function hojaControl(){
   const c = resultado.control, aoa = [];
   const titulo = t => aoa.push([celda(t, AZUL_HDR)]);
@@ -2810,21 +3019,39 @@ function nombreSalida(){
   const f = ($('#fecha').value || '').replace(/-/g,'');
   return 'Facturacion AR Regulares ' + f + '.xlsx';
 }
+/* El CSV de Dash se baja aparte del Excel: son dos columnas, ID y Pago hasta,
+   con el mismo formato de la plantilla "Importar fecha de pago hasta". */
+$('#btnCsvDash').addEventListener('click', () => {
+  const texto = csvPagoHasta();
+  // sin BOM: la plantilla de Dash son IDs y fechas ISO, no hay acentos que proteger
+  const blob = new Blob([texto], { type:'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'Importar fecha de pago hasta - ' + nombreSalida().replace(/\.xlsx$/i, '') + '.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+});
+
 $('#btnXlsx').addEventListener('click', () => {
   leerFormulas();
   const modo = 'externa';
   const wb = XLSX.utils.book_new();
   // Las cuatro hojas de tu archivo de importación, en el mismo orden, más la de
   // control. El resto se mira en el procesador y no baja al Excel.
-  XLSX.utils.book_append_sheet(wb, hojaImportVacia(), 'Import Odoo');
+  XLSX.utils.book_append_sheet(wb, hojaImportSaas(), 'Import Odoo');
+  if ((resultado.lineasTerm || []).length)
+    XLSX.utils.book_append_sheet(wb, hojaImportTerm(), 'Import Terminales');
   XLSX.utils.book_append_sheet(wb, hojaImport(modo), 'Preparación RG');
   XLSX.utils.book_append_sheet(wb, hojaPrepCP(), 'Preparación CP');
   XLSX.utils.book_append_sheet(wb, hojaPrepUP(), 'Preparación UP');
   if ((resultado.lineasTerm || []).length)
     XLSX.utils.book_append_sheet(wb, hojaPrepTerm(), 'Preparación Terminales');
-  XLSX.utils.book_append_sheet(wb, hojaFormulas(), 'Fórmulas');
+  if ((resultado.control.pagosDuplicados || []).length)
+    XLSX.utils.book_append_sheet(wb, hojaDuplicados(), 'Pagos duplicados');
   XLSX.utils.book_append_sheet(wb, hojaInfo(), 'Info');
   XLSX.utils.book_append_sheet(wb, hojaAnalisis(), 'Analisis facturacion');
+  XLSX.utils.book_append_sheet(wb, hojaFormulas(), 'Fórmulas');
   descargarLibro(wb, nombreSalida());
 });
 
