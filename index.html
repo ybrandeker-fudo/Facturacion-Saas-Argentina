@@ -236,7 +236,7 @@
     <div class="scroll"><table id="tabla"></table></div>
     <div class="row" style="margin-top:14px">
       <button id="btnXlsx">Descargar Excel</button>
-      <button class="sec naranja hidden" id="btnCsvDash">CSV "pago hasta" para Dash</button>
+      <button class="sec naranja" id="btnCsvDash" disabled>CSV "pago hasta" para Dash</button>
       <span class="muted" id="nombreArchivo"></span>
     </div>
   </div>
@@ -996,12 +996,27 @@
           terminosViejo: terminosViejo, terminosNuevo: terminosViejo,
           mesRepetido: false, pagoHasta: new Date(Math.max(ant.fin, t(act.fin)))
         };
+        const dd = d => d instanceof Date
+          ? String(d.getUTCDate()).padStart(2,'0') + '/' + String(d.getUTCMonth()+1).padStart(2,'0') +
+            '/' + d.getUTCFullYear()
+          : '';
         pagosDuplicados.push(caso);
-        if (!caso.corregido) return;                         // no se puede acomodar: sólo aviso
+        if (!caso.corregido) {                               // no se puede acomodar: sólo aviso
+          caso.detalle = 'el período venía ' + dd(caso.inicioVino) + ' → ' + dd(caso.fin) +
+            ' y el pago anterior termina el ' + dd(caso.finAnterior) +
+            ': no se pudo acomodar, miralo a mano';
+          return;
+        }
         act.inicio = nuevoIni;
         act.terminos = terminos(nuevoIni, act.fin, act.dias + act.diasViejo);
         caso.terminosNuevo = act.terminos;
         caso.mesRepetido = terminosViejo === act.terminos;
+        // esto es lo que se muestra en el aviso del procesador: qué cambió exactamente
+        caso.detalle = 'período ' + dd(caso.inicioVino) + ' → ' + dd(caso.fin) + '  se corrige a  ' +
+          dd(nuevoIni) + ' → ' + dd(act.fin) +
+          ' · términos "' + terminosViejo + '" → "' + act.terminos + '"' +
+          ' · fechas de ARCA idem · importe sin tocar' +
+          (caso.mesRepetido ? ' · OJO: quedó el mismo mes que el pago anterior' : '');
       });
     })();
     if (pagosDuplicados.length) {
@@ -1580,10 +1595,19 @@ function pintar(){
   armarTabs();
   $('#cTabs').classList.remove('hidden');
   $('#nombreArchivo').textContent = nombreSalida();
-  // el CSV de Dash sólo tiene sentido si hubo pagos duplicados que se pudieron acomodar
+  // El botón del CSV de Dash queda siempre a la vista, aunque esta corrida no
+  // tenga duplicados: si desapareciera no se distingue "no hay nada que corregir"
+  // de "se rompió algo". Cuando no hay, va apagado y lo dice.
   const hayDup = (resultado.control.pagosDuplicados || []).filter(d => d.corregido).length;
-  $('#btnCsvDash').classList.toggle('hidden', !hayDup);
-  if (hayDup) $('#btnCsvDash').textContent = 'CSV "pago hasta" para Dash (' + hayDup + ')';
+  const btnCsv = $('#btnCsvDash');
+  btnCsv.classList.remove('hidden');
+  btnCsv.disabled = !hayDup;
+  btnCsv.textContent = hayDup
+    ? 'CSV "pago hasta" para Dash (' + hayDup + ')'
+    : 'CSV "pago hasta" para Dash · sin pagos duplicados';
+  btnCsv.title = hayDup
+    ? 'Baja un CSV con ID de cuenta y Pago hasta, con el formato de la plantilla de Dash'
+    : 'Esta corrida no tiene pagos duplicados. Acordate de bajar el historial desde el 1ro del mes: el primer pago puede ser de otro día.';
 }
 
 /* Cuadre explícito: cada cobro del extracto cae en Regulares o en un motivo.
