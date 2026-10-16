@@ -3073,8 +3073,8 @@ $('#btnXlsx').addEventListener('click', () => {
     XLSX.utils.book_append_sheet(wb, hojaPrepTerm(), 'Preparación Terminales');
   if ((resultado.control.pagosDuplicados || []).length)
     XLSX.utils.book_append_sheet(wb, hojaDuplicados(), 'Pagos duplicados');
-  XLSX.utils.book_append_sheet(wb, hojaInfo(), 'Info');
   XLSX.utils.book_append_sheet(wb, hojaAnalisis(), 'Analisis facturacion');
+  XLSX.utils.book_append_sheet(wb, hojaInfo(), 'Info');
   XLSX.utils.book_append_sheet(wb, hojaFormulas(), 'Fórmulas');
   descargarLibro(wb, nombreSalida());
 });
